@@ -13,5 +13,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Provide the runtime's fixed Node path
+        run: |
+          sudo install -m 0755 "$(command -v node)" /usr/bin/node
+          /usr/bin/node --version
       - run: npm ci
       - run: npm test
