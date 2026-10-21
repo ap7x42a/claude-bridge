@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "startup|resume|clear|compact", "hooks": [{ "type": "command", "command": "/usr/bin/python3 -I __PROTECTED_ROOT__/current/hooks/bridge_hook.py", "timeout": 10 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/bin/python3 -I __PROTECTED_ROOT__/current/hooks/bridge_hook.py", "timeout": 10 }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/bin/python3 -I __PROTECTED_ROOT__/current/hooks/bridge_hook.py", "timeout": 10 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/bin/python3 -I __PROTECTED_ROOT__/current/hooks/bridge_hook.py", "timeout": 10 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/bin/python3 -I __PROTECTED_ROOT__/current/hooks/bridge_hook.py", "timeout": 15 }] }]
+  }
+}

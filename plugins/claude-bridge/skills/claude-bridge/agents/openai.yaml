@@ -1,0 +1,7 @@
+interface:
+  display_name: "Claude Bridge"
+  short_description: "Adversarial review with corrective authority"
+  default_prompt: "Use $claude-bridge to ask Claude Code for an adversarial review of the current changes."
+
+policy:
+  allow_implicit_invocation: false

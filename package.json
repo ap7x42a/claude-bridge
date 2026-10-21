@@ -1,0 +1,17 @@
+{
+  "name": "claude-bridge",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "description": "Corrective review and delegated work through Claude Code for Codex.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run --config config/vitest/vitest.claude-bridge.config.ts"
+  },
+  "devDependencies": {
+    "vitest": "3.2.4"
+  }
+}

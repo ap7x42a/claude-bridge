@@ -1,0 +1,174 @@
+#!/usr/bin/node
+// Owner command for Claude Bridge. Read-only except `clear` and `install`.
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  effectiveRoots, hooksIntact, installedOwnerPublicKey, installedOwnerPublicKeyPath, isRegisteredRepo, protectionStatus, runtimeDefaults,
+} from "../mcp/protection.mjs";
+import { applyOwnerClear, currentState, readChain, repoKey, repoStateDir, signOwnerClear } from "../mcp/verdict.mjs";
+
+const self = fileURLToPath(import.meta.url);
+const here = dirname(self);
+// Run from /opt/claude-bridge, every location comes from runtimeDefaults and the environment's overrides and
+// test knobs are ignored. Recomputed after actAsOwner, which changes the process uid and so the passwd home.
+const located = { serverPath: self };
+let runtime = runtimeDefaults({ selfPath: self, env: process.env });
+let env = runtime.env;
+const argv = process.argv.slice(2);
+const command = argv.shift();
+const USAGE = [
+  "usage: claude-bridge status [repo] | verdicts [repo] | verify [repo]",
+  "       claude-bridge clear <verdict-id|'*'> --reason <text> [--owner <user>] [repo]",
+  "       claude-bridge install [--dry-run] [--root DIR] [--repo DIR] [--owner <user>] [--claude-bin FILE] [--no-lock-cache] [--source <checkout> [--allow-dirty]]",
+  "after the first install, always run clear from /opt/claude-bridge/current/bin; upgrade with: sudo /opt/claude-bridge/current/bin/install.sh --source <checkout>",
+].join("\n");
+
+// The root branch of the owner checks; CLAUDE_BRIDGE_TEST_FORCE_ROOT takes it in test mode only and grants nothing.
+const asRoot = () => process.getuid?.() === 0 || (runtime.testMode && env.CLAUDE_BRIDGE_TEST_FORCE_ROOT === "1");
+
+/** Under root, the owner account comes from --owner or sudo; without either, whose state to act on is unknown. */
+function requireOwnerAccount(owner) {
+  const name = owner || env.SUDO_USER;
+  if (!name) throw new Error("run through sudo so the owner account is known (or pass --owner <user>)");
+  return name;
+}
+
+/**
+ * Under root, HOME is root's, but the verdict state and the Codex home are the owner's, and anything
+ * `clear` writes there must stay the owner's for the bridge to read. Root is needed only to read the
+ * owner key, so drop to the owner account before touching state.
+ */
+function actAsOwner(name) {
+  if (process.getuid?.() !== 0 || !name) return;
+  const result = spawnSync("/usr/bin/getent", ["passwd", name], { encoding: "utf8" });
+  const fields = result.status === 0 ? result.stdout.trim().split(":") : [];
+  if (fields.length < 7) throw new Error(`unknown owner account: ${name}`);
+  const [uid, gid, home] = [Number(fields[2]), Number(fields[3]), fields[5]];
+  process.initgroups(name, gid);
+  process.setgid(gid);
+  process.setuid(uid);
+  process.env.HOME = home;
+  runtime = runtimeDefaults({ selfPath: self, env: process.env });
+  env = runtime.env;
+}
+
+function parseArgs(rest) {
+  const positional = [];
+  const options = {};
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--reason" || rest[i] === "--owner") { options[rest[i].slice(2)] = rest[i + 1]; i += 1; }
+    else if (rest[i].startsWith("--")) throw new Error(`unknown option ${rest[i]}\n${USAGE}`);
+    else positional.push(rest[i]);
+  }
+  return { positional, options };
+}
+
+/** The bridge's repository for a path: its realpath, then the nearest directory holding .git. */
+function repoFor(path) {
+  const start = realpathSync(path ?? process.cwd());
+  for (let current = start; ; current = dirname(current)) {
+    if (existsSync(join(current, ".git"))) return current;
+    if (dirname(current) === current) throw new Error(`no Git repository at or above ${start}`);
+  }
+}
+
+function publicKeyPem() {
+  const pem = installedOwnerPublicKey({ ...located, env });
+  if (pem === null) throw new Error("owner public key not installed");
+  return pem;
+}
+
+const registeredRepo = (repo) => isRegisteredRepo(repo, env, located);
+/** The verdict state, with owner clears verified against the installed public key when there is one. */
+const verdictState = (repo) => currentState(repo, env, { registered: registeredRepo(repo), ownerPublicKeyPem: installedOwnerPublicKey({ ...located, env }) });
+
+const recordFailurePath = (repo) => join(repoStateDir(repo, env), "record-failure.json");
+
+function recordFailureMarker(repo) {
+  const path = recordFailurePath(repo);
+  if (!existsSync(path)) return "absent";
+  let recordedAt;
+  try { recordedAt = JSON.parse(readFileSync(path, "utf8"))?.recorded_at; } catch { /* reported as unreadable */ }
+  return `present (${typeof recordedAt === "string" ? recordedAt : "unreadable"})`;
+}
+
+function stateLine(state) {
+  if (state.status === "open") {
+    return `state: open (verdict ${state.open.id}, ${state.open.verdict}, readback ${state.open.readback_confirmed ? "confirmed" : "pending"})`;
+  }
+  if (state.status === "tampered") return `state: tampered (${state.reason})`;
+  return `state: ${state.status}`;
+}
+
+function status(repo) {
+  const registered = registeredRepo(repo);
+  const state = verdictState(repo);
+  const protection = protectionStatus({ serverPath: join(here, "..", "mcp", "server.mjs"), env });
+  const hooks = hooksIntact(env, located);
+  const keyPath = installedOwnerPublicKeyPath({ ...located, env });
+  console.log(`repository: ${repo}`);
+  console.log(stateLine(state));
+  console.log(`chain intact: ${state.chain_intact}; open cache valid: ${state.open_cache_valid}`);
+  console.log(`protection: ${protection.status}${protection.reasons.length ? ` (${protection.reasons.join("; ")})` : ""}`);
+  console.log(`hooks: ${hooks.intact ? "intact" : `not intact (${hooks.reasons.join("; ")})`}`);
+  console.log(`registered: ${registered}`);
+  console.log(`state dir: ${repoStateDir(repo, env)}`);
+  console.log(`record failure marker: ${recordFailureMarker(repo)}`);
+  console.log(keyPath === null ? "owner clears: unverified (no public key)" : `owner clears: verified against ${keyPath}`);
+}
+
+function verdicts(repo) {
+  const chain = readChain(repoStateDir(repo, env));
+  console.log(`chain intact: ${chain.intact}; records: ${chain.records.length}`);
+  for (const record of chain.records) {
+    if (record.type === "verdict") console.log(`${record.recorded_at} ${record.id} ${record.profile} ${record.verdict?.verdict} :: ${record.verdict?.operator_readback}`);
+    else if (record.type === "run_started") console.log(`${record.recorded_at} ${record.id} run_started ${record.profile} job ${record.job_id}`);
+    else console.log(`${record.recorded_at ?? ""} ${record.type} ${record.verdict_id ?? ""}${record.reason ? ` :: ${record.reason}` : ""}`);
+  }
+}
+
+function clear(rest) {
+  const { positional: [verdictId, repoPath], options: { reason, owner } } = parseArgs(rest);
+  if (!verdictId || !reason) throw new Error(USAGE);
+  const root = asRoot();
+  const ownerName = root ? requireOwnerAccount(owner) : undefined;
+  const keyPath = env.CLAUDE_BRIDGE_OWNER_KEY || join(effectiveRoots({ ...located, env }).etcDir, "owner.key");
+  if (!root && !(env.CLAUDE_BRIDGE_OWNER_KEY && existsSync(env.CLAUDE_BRIDGE_OWNER_KEY))) {
+    throw new Error("clear must run as root (sudo); the owner key is root-only");
+  }
+  if (!existsSync(keyPath)) throw new Error(`owner key not found at ${keyPath}`);
+  const privateKeyPem = readFileSync(keyPath, "utf8");
+  actAsOwner(ownerName);
+  const repo = repoFor(repoPath);
+  const signed = signOwnerClear({ verdict_id: verdictId, reason, issued_at: new Date().toISOString(), repo_key: repoKey(repo) }, privateKeyPem);
+  const outcome = applyOwnerClear(repo, env, signed, publicKeyPem(), { registered: registeredRepo(repo) });
+  if (!outcome.applied) throw new Error(`clear rejected: ${outcome.reason}`);
+  // An owner clear also ends the refusal left by a verdict that could not be recorded.
+  rmSync(recordFailurePath(repo), { force: true });
+  console.log(`cleared ${verdictId} for ${repo}: ${reason}`);
+  console.log(stateLine(verdictState(repo)));
+  console.log("note: a running bridge keeps an in-process latch until it records a verdict or restarts");
+}
+
+try {
+  if (command === "install") {
+    if (asRoot()) requireOwnerAccount(argv.includes("--owner") ? argv[argv.indexOf("--owner") + 1] : undefined);
+    const result = spawnSync("/bin/bash", [join(here, "install.sh"), ...argv], { stdio: "inherit", env });
+    process.exit(result.status ?? 1);
+  } else if (command === "clear") clear(argv);
+  else if (command === "status" || command === "verify" || command === "verdicts") {
+    const { positional, options } = parseArgs(argv);
+    actAsOwner(options.owner || env.SUDO_USER);
+    const repo = repoFor(positional[0]);
+    if (command === "verdicts") verdicts(repo);
+    else status(repo);
+  } else {
+    console.error(USAGE);
+    process.exit(2);
+  }
+} catch (error) {
+  console.error(`claude-bridge: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "claude_bridge": {
+      "command": "/usr/bin/node",
+      "args": ["/opt/claude-bridge/current/mcp/server.mjs", "--stdio"],
+      "cwd": ".",
+      "startup_timeout_sec": 20
+    }
+  }
+}
